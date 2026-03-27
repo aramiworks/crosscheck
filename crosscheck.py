@@ -47,7 +47,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "exclude": ["*.test.*", "*.spec.*", "*.min.*", "node_modules/**", "dist/**", "build/**"],
     "max_diff_lines": 200,
     "timeout": 30,
+    "thinking": False,
 }
+
+# Models known to support thinking mode — disable by default for speed
+THINKING_MODELS: set[str] = {"qwen3", "deepseek-r1", "qwq"}
 
 REVIEW_SYSTEM_PROMPT = """\
 You are an adversarial code reviewer. Your job is to find real bugs, security \
@@ -117,6 +121,10 @@ def load_config() -> dict[str, Any]:
                 config[config_key] = int(val)
             else:
                 config[config_key] = val
+
+    thinking_env = os.environ.get("CROSSCHECK_THINKING")
+    if thinking_env is not None:
+        config["thinking"] = thinking_env.lower() in ("1", "true", "yes")
 
     include_env = os.environ.get("CROSSCHECK_INCLUDE")
     if include_env:
@@ -195,10 +203,17 @@ def call_review_model(
     model: str = config["model"]
     timeout: int = config.get("timeout", 30)
 
+    # Disable thinking mode for known thinking models unless explicitly enabled
+    thinking_enabled: bool = config.get("thinking", False)
+    system_prompt = REVIEW_SYSTEM_PROMPT
+    model_family = model.split(":")[0].lower()
+    if model_family in THINKING_MODELS and not thinking_enabled:
+        system_prompt = "/no_think\n" + system_prompt
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
