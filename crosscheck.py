@@ -638,10 +638,20 @@ def cmd_dry_run(config: dict[str, Any]) -> None:
         line_count = content.count("\n") + 1
         max_lines: int = config.get("max_diff_lines", 200)
         print(f"Lines:    {line_count} (max: {max_lines})")
-        if line_count > max_lines:
-            print("Action:   SKIP (exceeds max_diff_lines)")
-        elif file_path and not should_review(file_path, config):
+
+        # Check for Write diffs first — a large file may have a small diff
+        write_diff = None
+        if tool_name == "Write" and file_path:
+            diff_result, is_new = compute_file_diff(file_path, content, max_lines)
+            if not is_new and diff_result is None:
+                print("Action:   SKIP (no changes or diff too large)")
+            else:
+                write_diff = diff_result
+
+        if file_path and not should_review(file_path, config):
             print("Action:   SKIP (excluded by patterns)")
+        elif write_diff is None and tool_name != "Write" and line_count > max_lines:
+            print("Action:   SKIP (exceeds max_diff_lines)")
         else:
             print("Action:   WOULD REVIEW")
             if tool_name == "Edit" and old_content and file_path:
@@ -650,13 +660,9 @@ def cmd_dry_run(config: dict[str, Any]) -> None:
                 if ctx:
                     print("\n--- SURROUNDING CONTEXT ---")
                     print(ctx[:500])
-            if tool_name == "Write" and file_path:
-                diff_result, is_new = compute_file_diff(file_path, content, max_lines)
-                if diff_result:
-                    print("\n--- DIFF (existing file) ---")
-                    print(diff_result[:500])
-                elif not is_new:
-                    print("Note:     File exists with identical content (would skip)")
+            if write_diff:
+                print("\n--- DIFF (existing file) ---")
+                print(write_diff[:500])
             if old_content:
                 print(f"\n--- OLD ({len(old_content)} chars) ---")
                 print(old_content[:500])
@@ -718,7 +724,21 @@ def main() -> None:
         return
 
     max_lines: int = config.get("max_diff_lines", 200)
-    if content.count("\n") > max_lines:
+
+    # For Write operations, try to compute a diff first — the diff may be
+    # small even if the full file is large
+    diff_text = None
+    if tool_name == "Write":
+        diff_result, is_new = compute_file_diff(file_path, content, max_lines)
+        if not is_new and diff_result is None:
+            log(f"Skipping {file_path}: no changes or diff too large")
+            approve()
+            return
+        diff_text = diff_result
+
+    # Skip if raw content exceeds max lines (but not for Write with a diff,
+    # since the diff is what we'll actually send to the reviewer)
+    if diff_text is None and content.count("\n") > max_lines:
         log(f"Skipping {file_path}: {content.count(chr(10))} lines > {max_lines} max")
         approve()
         return
@@ -730,20 +750,11 @@ def main() -> None:
         print(json.dumps(cached))
         return
 
-    # Gather context for the reviewer
+    # Gather surrounding context for Edit operations
     surrounding_context = None
     if tool_name == "Edit" and old_content:
         ctx_lines: int = config.get("context_lines", 10)
         surrounding_context = read_surrounding_context(file_path, old_content, ctx_lines)
-
-    diff_text = None
-    if tool_name == "Write":
-        diff_result, is_new = compute_file_diff(file_path, content, max_lines)
-        if not is_new and diff_result is None:
-            log(f"Skipping {file_path}: no changes or diff too large")
-            approve()
-            return
-        diff_text = diff_result
 
     prompt = build_review_prompt(
         tool_name, file_path, content, old_content, surrounding_context, diff_text
